@@ -21,11 +21,11 @@ import java.lang.reflect.Field;
 import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.regex.Pattern;
+import java.util.regex.Matcher;
 
+import org.apache.cassandra.utils.SigarLibrary;
 import com.sun.jna.Native;
-
-import org.apache.cassandra.utils.Architecture;
-
 import sun.misc.Unsafe;
 import sun.nio.ch.DirectBuffer;
 
@@ -47,10 +47,25 @@ public abstract class MemoryUtil
 
     private static final boolean BIG_ENDIAN = ByteOrder.nativeOrder().equals(ByteOrder.BIG_ENDIAN);
 
-    public static final boolean INVERTED_ORDER = Architecture.IS_UNALIGNED && !BIG_ENDIAN;
+    private static final boolean UNALIGNED;
+    public static final boolean INVERTED_ORDER;
 
     static
     {
+        String arch = System.getProperty("os.arch");
+        if (arch.equals("ppc") || arch.equals("ppc64") || arch.equals("ppc64le"))
+        {
+            String cpuModel = SigarLibrary.instance.getCpuModel();
+            Matcher cpuMatcher = Pattern.compile("POWER(\\d+)").matcher(cpuModel);
+            // CPU model >= POWER8
+            UNALIGNED = cpuMatcher.find() && Integer.parseInt(cpuMatcher.group(1)) >= 8;
+        }
+        else
+        {
+            UNALIGNED = arch.equals("i386") || arch.equals("x86")
+                    || arch.equals("amd64") || arch.equals("x86_64");
+        }
+        INVERTED_ORDER = UNALIGNED && !BIG_ENDIAN;
         try
         {
             Field field = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
@@ -116,7 +131,7 @@ public abstract class MemoryUtil
 
     public static void setInt(long address, int l)
     {
-        if (Architecture.IS_UNALIGNED)
+        if (UNALIGNED)
             unsafe.putInt(address, l);
         else
             putIntByByte(address, l);
@@ -124,7 +139,7 @@ public abstract class MemoryUtil
 
     public static void setLong(long address, long l)
     {
-        if (Architecture.IS_UNALIGNED)
+        if (UNALIGNED)
             unsafe.putLong(address, l);
         else
             putLongByByte(address, l);
@@ -137,17 +152,17 @@ public abstract class MemoryUtil
 
     public static int getShort(long address)
     {
-        return (Architecture.IS_UNALIGNED ? unsafe.getShort(address) : getShortByByte(address)) & 0xffff;
+        return (UNALIGNED ? unsafe.getShort(address) : getShortByByte(address)) & 0xffff;
     }
 
     public static int getInt(long address)
     {
-        return Architecture.IS_UNALIGNED ? unsafe.getInt(address) : getIntByByte(address);
+        return UNALIGNED ? unsafe.getInt(address) : getIntByByte(address);
     }
 
     public static long getLong(long address)
     {
-        return Architecture.IS_UNALIGNED ? unsafe.getLong(address) : getLongByByte(address);
+        return UNALIGNED ? unsafe.getLong(address) : getLongByByte(address);
     }
 
     public static ByteBuffer getByteBuffer(long address, int length)
@@ -178,7 +193,7 @@ public abstract class MemoryUtil
         {
             throw new AssertionError(e);
         }
-        instance.order(order);
+        instance.order(ByteOrder.nativeOrder());
         return instance;
     }
 
@@ -218,11 +233,22 @@ public abstract class MemoryUtil
 
     public static ByteBuffer duplicateDirectByteBuffer(ByteBuffer source, ByteBuffer hollowBuffer)
     {
-        assert source.getClass() == DIRECT_BYTE_BUFFER_CLASS || source.getClass() == RO_DIRECT_BYTE_BUFFER_CLASS;
+        assert(source.isDirect());
         unsafe.putLong(hollowBuffer, DIRECT_BYTE_BUFFER_ADDRESS_OFFSET, unsafe.getLong(source, DIRECT_BYTE_BUFFER_ADDRESS_OFFSET));
         unsafe.putInt(hollowBuffer, DIRECT_BYTE_BUFFER_POSITION_OFFSET, unsafe.getInt(source, DIRECT_BYTE_BUFFER_POSITION_OFFSET));
         unsafe.putInt(hollowBuffer, DIRECT_BYTE_BUFFER_LIMIT_OFFSET, unsafe.getInt(source, DIRECT_BYTE_BUFFER_LIMIT_OFFSET));
         unsafe.putInt(hollowBuffer, DIRECT_BYTE_BUFFER_CAPACITY_OFFSET, unsafe.getInt(source, DIRECT_BYTE_BUFFER_CAPACITY_OFFSET));
+        return hollowBuffer;
+    }
+
+    public static ByteBuffer duplicateByteBuffer(ByteBuffer source, ByteBuffer hollowBuffer)
+    {
+        assert(!source.isDirect());
+        unsafe.putInt(hollowBuffer, DIRECT_BYTE_BUFFER_POSITION_OFFSET, unsafe.getInt(source, DIRECT_BYTE_BUFFER_POSITION_OFFSET));
+        unsafe.putInt(hollowBuffer, DIRECT_BYTE_BUFFER_LIMIT_OFFSET, unsafe.getInt(source, DIRECT_BYTE_BUFFER_LIMIT_OFFSET));
+        unsafe.putInt(hollowBuffer, DIRECT_BYTE_BUFFER_CAPACITY_OFFSET, unsafe.getInt(source, DIRECT_BYTE_BUFFER_CAPACITY_OFFSET));
+        unsafe.putInt(hollowBuffer, BYTE_BUFFER_OFFSET_OFFSET, unsafe.getInt(source, BYTE_BUFFER_OFFSET_OFFSET));
+        unsafe.putObject(hollowBuffer, BYTE_BUFFER_HB_OFFSET, unsafe.getObject(source, BYTE_BUFFER_HB_OFFSET));
         return hollowBuffer;
     }
 

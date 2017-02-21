@@ -185,4 +185,16 @@ public class SigarLibrary
             logger.info("Sigar could not be initialized, test for checking degraded mode omitted.");
         }
     }
+
+    public String getCpuModel()
+    {
+        try
+        {
+            return initialized ? sigar.getCpuInfoList()[0].getModel() : "Unknown";
+        }
+        catch (SigarException e)
+        {
+            return "Unknown";
+        }
+    }
 }
