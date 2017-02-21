@@ -21,26 +21,23 @@ import java.lang.management.GarbageCollectorMXBean;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryUsage;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-
 import javax.management.MBeanServer;
 import javax.management.Notification;
 import javax.management.NotificationListener;
 import javax.management.ObjectName;
 import javax.management.openmbean.CompositeData;
 
-import com.sun.management.GarbageCollectionNotificationInfo;
-import com.sun.management.GcInfo;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
-
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.utils.StatusLogger;
 
@@ -57,7 +54,7 @@ public class GCInspector implements NotificationListener, GCInspectorMXBean
      * bytes of direct memory requires via ByteBuffer.allocateDirect that have not been GCed.
      */
     final static Field BITS_TOTAL_CAPACITY;
-
+    final static Class<?> sunManagement;
     static
     {
         Field temp = null;
@@ -74,6 +71,18 @@ public class GCInspector implements NotificationListener, GCInspectorMXBean
             //Don't care, will just return the dummy value -1 if we can't get at the field in this JVM
         }
         BITS_TOTAL_CAPACITY = temp;
+
+        Class<?> tmp=null;
+        try
+        {
+            tmp=Class.forName("com.sun.management.GarbageCollectorMXBean");
+        }
+        catch (ClassNotFoundException t)
+        {
+            logger.warn("Cannot load sun GC monitoring classes: there will be reduce GC monitoring capabilities");
+
+        }
+        sunManagement=tmp;
     }
 
     static final class State
@@ -118,12 +127,12 @@ public class GCInspector implements NotificationListener, GCInspectorMXBean
             this.assumeGCIsOldGen = assumeGCIsOldGen;
         }
 
-        String[] keys(GarbageCollectionNotificationInfo info)
+        String[] keys(GarbageCollectionNotificationInfoWrapper info)
         {
             if (keys != null)
                 return keys;
 
-            keys = info.getGcInfo().getMemoryUsageBeforeGc().keySet().toArray(new String[0]);
+            keys = info.getMemoryUsageBeforeGc().keySet().toArray(new String[0]);
             Arrays.sort(keys);
 
             return keys;
@@ -137,7 +146,6 @@ public class GCInspector implements NotificationListener, GCInspectorMXBean
     public GCInspector()
     {
         MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
-
         try
         {
             ObjectName gcName = new ObjectName(ManagementFactory.GARBAGE_COLLECTOR_MXBEAN_DOMAIN_TYPE + ",*");
@@ -226,15 +234,13 @@ public class GCInspector implements NotificationListener, GCInspectorMXBean
     public void handleNotification(final Notification notification, final Object handback)
     {
         String type = notification.getType();
-        if (type.equals(GarbageCollectionNotificationInfo.GARBAGE_COLLECTION_NOTIFICATION))
+        if (type.equals("com.sun.management.gc.notification"))
         {
             // retrieve the garbage collection notification information
             CompositeData cd = (CompositeData) notification.getUserData();
-            GarbageCollectionNotificationInfo info = GarbageCollectionNotificationInfo.from(cd);
+            GarbageCollectionNotificationInfoWrapper info = new GarbageCollectionNotificationInfoWrapper((GarbageCollectorMXBean) cd);
             String gcName = info.getGcName();
-            GcInfo gcInfo = info.getGcInfo();
-
-            long duration = gcInfo.getDuration();
+            long duration = info.getDuration();
 
             /*
              * The duration supplied in the notification info includes more than just
@@ -253,8 +259,8 @@ public class GCInspector implements NotificationListener, GCInspectorMXBean
             StringBuilder sb = new StringBuilder();
             sb.append(info.getGcName()).append(" GC in ").append(duration).append("ms.  ");
             long bytes = 0;
-            Map<String, MemoryUsage> beforeMemoryUsage = gcInfo.getMemoryUsageBeforeGc();
-            Map<String, MemoryUsage> afterMemoryUsage = gcInfo.getMemoryUsageAfterGc();
+            Map<String, MemoryUsage> beforeMemoryUsage = info.getMemoryUsageBeforeGc();
+            Map<String, MemoryUsage> afterMemoryUsage = info.getMemoryUsageAfterGc();
             for (String key : gcState.keys(info))
             {
                 MemoryUsage before = beforeMemoryUsage.get(key);
@@ -294,6 +300,73 @@ public class GCInspector implements NotificationListener, GCInspectorMXBean
         }
     }
 
+
+    private final class GarbageCollectionNotificationInfoWrapper
+    {
+
+        private Map<String, MemoryUsage> usageBeforeGc = null;
+        private Map<String, MemoryUsage> usageAfterGc = null;
+        private String name;
+        private Long duration;
+
+
+        GarbageCollectionNotificationInfoWrapper(GarbageCollectorMXBean gcMxBean)
+        {
+            // if we've gotten this far, we've already verified that the right classes are in the CP. Now we just
+            // need to check for boneheadedness.
+            // grab everything we need here so that we don't have to deal with try/catch everywhere.
+
+            name=gcMxBean.getName();
+            duration=gcMxBean.getCollectionTime(); //wrong, but better than nothing
+
+            if (sunManagement != null)
+            {
+
+                try
+                {
+                    Method getGcInfo = gcMxBean.getClass().getDeclaredMethod("getLastGcInfo");
+                    Object lastGcInfo = getGcInfo.invoke(gcMxBean);
+
+
+                    if (lastGcInfo != null)
+                    {
+                        usageBeforeGc = (Map<String, MemoryUsage>) lastGcInfo.getClass()
+                                                                             .getDeclaredMethod("getMemoryUsageBeforeGc").invoke(lastGcInfo);
+                        usageAfterGc = (Map<String, MemoryUsage>) lastGcInfo.getClass()
+                                                                            .getDeclaredMethod("getMemoryUsageAfterGc").invoke(lastGcInfo);
+                        duration = (Long) lastGcInfo.getClass().getDeclaredMethod("getDuration").invoke(lastGcInfo);
+                        name = (String) gcMxBean.getClass().getDeclaredMethod("getGcName").invoke(gcMxBean);
+                    }
+                }
+                 catch (InvocationTargetException|NoSuchMethodException|IllegalAccessException e)
+                {
+                    throw new RuntimeException(e);
+                }
+
+            }
+        }
+
+        String getGcName()
+        {
+            return name;
+        }
+
+
+        Long getDuration()
+        {
+            return duration;
+        }
+
+        Map<String, MemoryUsage> getMemoryUsageAfterGc()
+        {
+            return usageAfterGc;
+        }
+
+        Map<String, MemoryUsage> getMemoryUsageBeforeGc()
+        {
+            return usageBeforeGc;
+        }
+    }
     public State getTotalSinceLastCheck()
     {
         return state.getAndSet(new State());
