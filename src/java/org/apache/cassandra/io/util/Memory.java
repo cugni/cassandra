@@ -71,7 +71,7 @@ public class Memory implements AutoCloseable
         else
         {
             unaligned = arch.equals("i386") || arch.equals("x86")
-                    || arch.equals("amd64") || arch.equals("x86_64");
+                    || arch.equals("amd64") || arch.equals("x86_64") || arch.equals("s390x");
         }
     }
 

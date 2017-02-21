@@ -122,6 +122,20 @@ public class FastByteOperations
             }
             if (!unaligned)
                 return new PureJavaOperations();
+            if (arch.equals("ppc") || arch.equals("ppc64") || arch.equals("ppc64le"))
+            {
+                String cpuModel = SigarLibrary.instance.getCpuModel();
+                Matcher cpuMatcher = Pattern.compile("POWER(\\d+)").matcher(cpuModel);
+                // CPU model >= POWER8
+                unaligned = cpuMatcher.find() && Integer.parseInt(cpuMatcher.group(1)) >= 8;
+            }
+            else
+            {
+                unaligned = arch.equals("i386") || arch.equals("x86")
+                                || arch.equals("amd64") || arch.equals("x86_64") || arch.equals("s390x");
+            }
+            if (!unaligned)
+                return new PureJavaOperations();
             try
             {
                 Class<?> theClass = Class.forName(UNSAFE_COMPARER_NAME);
