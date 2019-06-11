@@ -38,11 +38,13 @@ cassandra_storagedir="$CASSANDRA_HOME/data"
 #JAVA_HOME=/usr/local/jdk6
 
 # The java classpath (required)
-CLASSPATH="$CASSANDRA_CONF:$cassandra_bin"
+
 
 for jar in "$CASSANDRA_HOME"/lib/*.jar; do
     CLASSPATH="$CLASSPATH:$jar"
 done
+
+CLASSPATH="$CLASSPATH:$CASSANDRA_CONF:$cassandra_bin"
 
 # JSR223 - collect all JSR223 engines' jars
 for jsr223jar in "$CASSANDRA_HOME"/lib/jsr223/*/*.jar; do
